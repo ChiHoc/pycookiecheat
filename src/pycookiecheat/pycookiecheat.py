@@ -34,11 +34,31 @@ except ImportError:
 
 def chrome_cookies(url, cookie_file=None):
 
-    salt = b'saltysalt'
-    iv = b' ' * 16
-    length = 16
+    def decrypt(value, encrypted_value, key=None):
 
-    def chrome_decrypt(encrypted_value, key=None):
+        # Mac or Linux
+        if (sys.platform == 'darwin') or sys.platform.startswith('linux'):
+            if value or (encrypted_value[:3] != b'v10'):
+                return value
+            else:
+                return aes_decrypt(encrypted_value, key)
+
+        # Windows
+        elif sys.platform.startswith('win32'):
+            try:
+                import win32crypt
+            except ImportError:
+                raise BrowserCookieError('win32crypt must be available to decrypt Chrome cookie on Windows')
+            data = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1].decode("utf-8")
+            return data
+
+        else:
+            raise OSError("Unknown platform.")
+
+
+    def aes_decrypt(encrypted_value, key=None):
+
+        iv = b' ' * 16
 
         # Encrypted cookies should be prefixed with 'v10' according to the
         # Chromium code. Strip it off.
@@ -63,34 +83,44 @@ def chrome_cookies(url, cookie_file=None):
 
         return clean(decrypted)
 
+    # Generate key from values
+    def generate_aes_decrypt_key(my_pass, iterations):
+
+        salt = b'saltysalt'
+        length = 16
+
+        kdf = PBKDF2HMAC(
+            algorithm=SHA1(),
+            length=length,
+            salt=salt,
+            iterations=iterations,
+            backend=default_backend(),
+        )
+        return kdf.derive(bytes(my_pass))
+
     # If running Chrome on OSX
     if sys.platform == 'darwin':
-        my_pass = keyring.get_password('Chrome Safe Storage', 'Chrome')
-        my_pass = my_pass.encode('utf8')
-        iterations = 1003
+        key = generate_aes_decrypt_key(keyring.get_password('Chrome Safe Storage', 'Chrome').encode('utf8'), 1003)
         cookie_file = cookie_file or os.path.expanduser(
-            '~/Library/Application Support/Google/Chrome/Default/Cookies'
+            u'~/Library/Application Support/Google/Chrome/Default/Cookies'
         )
 
     # If running Chromium on Linux
     elif sys.platform.startswith('linux'):
-        my_pass = 'peanuts'.encode('utf8')
-        iterations = 1
+        key = generate_aes_decrypt_key('peanuts'.encode('utf8'), 1)
         cookie_file = cookie_file or os.path.expanduser(
-            '~/.config/chromium/Default/Cookies'
+            u'~/.config/chromium/Default/Cookies'
         )
-    else:
-        raise OSError("This script only works on OSX or Linux.")
 
-    # Generate key from values above
-    kdf = PBKDF2HMAC(
-        algorithm=SHA1(),
-        length=length,
-        salt=salt,
-        iterations=iterations,
-        backend=default_backend(),
-    )
-    key = kdf.derive(bytes(my_pass))
+    # If running Chrome on Windows
+    elif sys.platform.startswith('win32'):
+        key = None
+        cookie_file = cookie_file or os.path.expanduser(
+            u'~\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cookies'
+        )
+
+    else:
+        raise OSError("Unknown platform.")
 
     parsed_url = urlparse(url)
 
@@ -106,15 +136,13 @@ def chrome_cookies(url, cookie_file=None):
     cookies = {}
 
     for host_key in generate_host_keys(domain):
+        print(host_key)
         cookies_list = []
         for k, v, ev in conn.execute(sql, (host_key,)):
             # if there is a not encrypted value or if the encrypted value
             # doesn't start with the 'v10' prefix, return v
-            if v or (ev[:3] != b'v10'):
-                cookies_list.append((k, v))
-            else:
-                decrypted_tuple = (k, chrome_decrypt(ev, key=key))
-                cookies_list.append(decrypted_tuple)
+            decrypted_tuple = (k, decrypt(v, ev, key=key))
+            cookies_list.append(decrypted_tuple)
         cookies.update(cookies_list)
 
     conn.rollback()
