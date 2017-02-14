@@ -136,7 +136,6 @@ def chrome_cookies(url, cookie_file=None):
     cookies = {}
 
     for host_key in generate_host_keys(domain):
-        print(host_key)
         cookies_list = []
         for k, v, ev in conn.execute(sql, (host_key,)):
             # if there is a not encrypted value or if the encrypted value
